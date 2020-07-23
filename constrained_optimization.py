@@ -12,7 +12,7 @@ import re
 import torch
 import numpy as np
 import pandas as pd
-from pulp import LpVariable, LpInteger, LpProblem, LpMinimize, lpSum, pulp
+from pulp import LpVariable, LpInteger, LpProblem, LpMinimize, lpSum, pulp, LpStatus
 import six
 from abc import abstractmethod, ABCMeta
 
@@ -50,6 +50,12 @@ class pulpSolver(metaclass = ABCMeta):
             "exp(": "np.exp(",
             "log(": "np.log(",
         }
+        self.pulp_solve_status = {
+            0: 'Not Solved', # Not Solved
+            1: 'Optimal', # Optimal
+            -1: 'Infeasible', # Infeasible
+            -2: 'Unbounded', # Unbounded
+            -3: 'Undefined'} # Undefined
         self.decision_var_row = decision_vars[0]
         self.decision_var_col = decision_vars[1]
         self.obj_func = self.convert_pulp_func(obj_formula, self.pulp_convert_map)
@@ -93,7 +99,11 @@ class pulpSolver(metaclass = ABCMeta):
         # constrain functions
         for cons_func, cons_op in self.d_cons_func.items():
             cons_func = eval(cons_func)
-            if isinstance(cons_func, np.ndarray):
+            if isinstance(cons_func, np.ndarray) and len(cons_func.shape) == 2:
+                for cons_item in cons_func:
+                    for ele in cons_item:
+                        self.solver += self.convert_cons(ele, cons_op)
+            elif isinstance(cons_func, np.ndarray) and len(cons_func.shape) == 1:
                 for ele in cons_func:
                     self.solver += self.convert_cons(ele, cons_op)
             else:
@@ -104,7 +114,7 @@ class pulpSolver(metaclass = ABCMeta):
         求解
         :return:
         """
-        status = self.solver.solve()
+        status = self.pulp_solve_status[self.solver.solve()]
         objective = pulp.value(self.solver.objective)
         decision_var = []
         for v in self.solver.variables():
@@ -284,11 +294,11 @@ z = data.iloc[:, 4].values
 a = [80, 140, 30, 50]
 b = [30, 70, 10, 10]
 obj_formula = 'sum(x * y)' #min
-d_cons_formula = {'sum(x,0)-b': 'ge','a-sum(x,0)': 'gt', 'z-sum(x,1)': 'eq'}  # >=0
+d_cons_formula = {'sum(x,0)-b': 'ge','a-sum(x,0)': 'gt', 'z-sum(x,1)': 'eq', 'x':'gt'}  # >=0
 oop = on_optimize(integrityOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
 oop.show_info()
-# oop = on_optimize(binaryOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
-# oop.show_info()
+oop = on_optimize(binaryOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
+oop.show_info()
 
 # obj_formula = 'sum(x * "y")' #min
 # oop = on_optimize(realNumberOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
