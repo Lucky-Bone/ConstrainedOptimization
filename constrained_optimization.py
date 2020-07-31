@@ -15,8 +15,9 @@ import pandas as pd
 from tqdm import trange
 from pulp import LpVariable, LpInteger, LpProblem, LpMinimize, lpSum, pulp, LpStatus
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-import six
 from abc import abstractmethod, ABCMeta
+import six
+# @six.add_metaclass(ABCMeta)
 
 
 def convert_func_op_format(formula, op_convert_map):
@@ -31,7 +32,6 @@ def convert_func_op_format(formula, op_convert_map):
     return formula
 
 
-@six.add_metaclass(ABCMeta)
 # Abstract Factory
 class optimizationFactory(metaclass = ABCMeta):
     @abstractmethod
@@ -42,7 +42,7 @@ class optimizationFactory(metaclass = ABCMeta):
 # 抽象产品
 class pulpSolver(metaclass = ABCMeta):
     @abstractmethod
-    def __init__(self, decision_vars, obj_formula, d_cons_formula):
+    def __init__(self, decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula):
         """
         将字符串对象转为pulp对象
         """
@@ -58,8 +58,9 @@ class pulpSolver(metaclass = ABCMeta):
             -1: 'Infeasible', # Infeasible
             -2: 'Unbounded', # Unbounded
             -3: 'Undefined'} # Undefined
-        self.decision_var_row = decision_vars[0]
-        self.decision_var_col = decision_vars[1]
+        self.decision_var_row = decision_var_shape[0]
+        self.decision_var_col = decision_var_shape[1]
+        self.decision_var_symbol = decision_var_symbol
         self.obj_func = self.convert_pulp_func(obj_formula, self.pulp_convert_map)
         self.d_cons_func = {self.convert_pulp_func(cons_formula, self.pulp_convert_map): cons_op for cons_formula, cons_op
                         in d_cons_formula.items()}
@@ -72,7 +73,12 @@ class pulpSolver(metaclass = ABCMeta):
         :return: pulp可解析的公式对象
         """
         # 将公式对象中的运算符转为指定的类型的运算符
-        return convert_func_op_format(formula, op_convert_map)
+        formula = convert_func_op_format(formula, op_convert_map)
+        # 将公式中的非决策变量转为pulp可识别对象
+        pattern = '\"(.*?)\"([>=!<]*0?)'
+        tensor_expr = lambda x: x[1] + x[2]
+        formula = re.sub(pattern, tensor_expr, formula)
+        return formula
 
     def convert_cons(self, cons_formula, cons_op):
         """
@@ -94,7 +100,8 @@ class pulpSolver(metaclass = ABCMeta):
         """
         定义求解器solver
         """
-        x = self.decision_vars
+        for attr_name, attr_value in self.d_decision_vars.items():
+            exec("{} = attr_value".format(attr_name))
         # object function
         self.solver += eval(self.obj_func)
     
@@ -122,11 +129,11 @@ class pulpSolver(metaclass = ABCMeta):
         for v in self.solver.variables():
             # print(v.name, v.varValue)
             decision_var.append(v.varValue)
-        decision_var = np.array(decision_var).reshape([self.decision_var_row, self.decision_var_col])
+        decision_var = np.array(decision_var).reshape([len(self.decision_var_symbol), self.decision_var_row, self.decision_var_col])
         return status, objective, decision_var
 
 class GDSolver(metaclass = ABCMeta):
-    def __init__(self, decision_vars, obj_formula, d_cons_formula):
+    def __init__(self, decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula):
         """
         将字符串对象转为torch对象
         :param formula: str，输入的公式，如'min("desc_var"）-0.01'
@@ -139,8 +146,9 @@ class GDSolver(metaclass = ABCMeta):
             "exp(": "torch.exp(",
             "log(": "torch.log(",
         }
-        self.decision_var_row = decision_vars[0]
-        self.decision_var_col = decision_vars[1]
+        self.decision_var_row = decision_var_shape[0]
+        self.decision_var_col = decision_var_shape[1]
+        self.decision_var_symbol = decision_var_symbol
         self.obj_formula = self.convert_torch_func(obj_formula, self.torch_convert_map)
         self.d_cons_formula = {self.convert_torch_func(cons_formula, self.torch_convert_map): cons_op for cons_formula, cons_op in d_cons_formula.items()}
     
@@ -177,27 +185,36 @@ class GDSolver(metaclass = ABCMeta):
         
 # 具体产品
 class pulpIntegritySolver(pulpSolver):
-    def __init__(self, decision_vars, obj_formula, d_cons_formula):
-        super(pulpIntegritySolver, self).__init__(decision_vars, obj_formula, d_cons_formula)
+    def __init__(self, decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula):
+        super(pulpIntegritySolver, self).__init__(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
         # generate decision_vars
-        self.decision_vars = [LpVariable('dcs_var_{}_{}'.format(i,j), cat = LpInteger) for i in range(self.decision_var_row) for j in range(self.decision_var_col)]
-        self.decision_vars = np.array(self.decision_vars).reshape([self.decision_var_row, self.decision_var_col])
+        self.d_decision_vars = dict()
+        for var in self.decision_var_symbol:
+            self.d_decision_vars[var] = [LpVariable('{}_{}_{}'.format(var, i, j), cat=LpInteger) for i in range(self.decision_var_row) for
+                  j in range(self.decision_var_col)]
+            self.d_decision_vars[var] = np.array(self.d_decision_vars[var]).reshape([self.decision_var_row, self.decision_var_col])
         # define optimization object
         self.solver = LpProblem('Intergrity_Optimization', LpMinimize)
   
 class pulpBinarySolver(pulpSolver):
-    def __init__(self, decision_vars, obj_formula, d_cons_formula):
-        super(pulpBinarySolver, self).__init__(decision_vars, obj_formula, d_cons_formula)
+    def __init__(self, decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula):
+        super(pulpBinarySolver, self).__init__(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
         # generate decision_vars
-        self.decision_vars = [LpVariable('dcs_var_{}_{}'.format(i,j), lowBound=0, upBound=1, cat = LpInteger) for i in range(self.decision_var_row) for j in range(self.decision_var_col)]
-        self.decision_vars = np.array(self.decision_vars).reshape([self.decision_var_row, self.decision_var_col])
+        self.d_decision_vars = dict()
+        for var in self.decision_var_symbol:
+            self.d_decision_vars[var] = [LpVariable('{}_{}_{}'.format(var, i, j), cat=LpInteger) for i in
+                                         range(self.decision_var_row) for
+                                         j in range(self.decision_var_col)]
+            self.d_decision_vars[var] = np.array(self.d_decision_vars[var]).reshape(
+                [self.decision_var_row, self.decision_var_col])
         # define optimization object
         self.solver = LpProblem('Intergrity_Optimization', LpMinimize)
         
 class GDRealNumberSolver(GDSolver):
-    def __init__(self, decision_vars, obj_formula, d_cons_formula):
-        super(GDRealNumberSolver, self).__init__(decision_vars, obj_formula, d_cons_formula)
-        self.decision_vars = torch.from_numpy(np.random.random([self.decision_var_row, self.decision_var_col])).type(torch.FloatTensor)
+    def __init__(self, decision_var_shape: list, decision_var_symbol: list, obj_formula: str, d_cons_formula: dict):
+        super(GDRealNumberSolver, self).__init__(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
+        # generate decision_vars
+        self.decision_vars = torch.from_numpy(np.random.random([len(self.decision_var_symbol), self.decision_var_row, self.decision_var_col])).type(torch.FloatTensor)
         self.lr = 0.001
         self.n_epoch = 1000
         self.stage_num = 100
@@ -225,21 +242,21 @@ class GDRealNumberSolver(GDSolver):
         """
         定义loss
         """
-        x = self.decision_vars
-        self.obj_func = eval('lambda x: {}'.format(self.obj_formula))
+        self.obj_func = eval('lambda {}: {}'.format(','.join(self.decision_var_symbol), self.obj_formula))
         # constrain functions
         l_cons_formula = list()
         for cons_formula, cons_op in self.d_cons_formula.items():
             cons_formula = self.convert_cons_to_uncons(cons_formula, cons_op)
             try:
-                cons_val = eval('lambda x: {}'.format(cons_formula))
+                cons_val = eval('lambda {}: {}'.format(','.join(self.decision_var_symbol), cons_formula))
             except SyntaxError:
                 raise SyntaxError('Invalid constrain format: {}'.format(cons_formula))
-            if not isinstance(cons_val(x), torch.Tensor):
+            if not isinstance(cons_val(*self.decision_vars), torch.Tensor):
                 raise SyntaxError('Invalid constrain value: {}, the values returns supposed to be a single value not array'.format(cons_formula))
             l_cons_formula.append(cons_formula)
-        self.cons_func = eval('lambda x: {}'.format('+'.join(l_cons_formula)))
-        self.loss_formula = 'lambda x, r: {} + r * ({})'.format(self.obj_formula, '+'.join(l_cons_formula))
+        self.cons_formula = '+'.join(l_cons_formula)
+        self.cons_func = eval('lambda {}: {}'.format(','.join(self.decision_var_symbol), self.cons_formula))
+        self.loss_formula = 'lambda {}, r: {} + r * ({})'.format(','.join(self.decision_var_symbol), self.obj_formula, '+'.join(l_cons_formula))
         self.loss_func = eval(self.loss_formula)
         
     def solve(self):
@@ -248,12 +265,13 @@ class GDRealNumberSolver(GDSolver):
         :return:
         """
         # calculate initial value
-        self.decision_vars = torch.autograd.Variable(torch.rand([self.decision_var_row, self.decision_var_col]), requires_grad=True)
-        ini_obj_value = self.obj_func(self.decision_vars)
-        ini_cons_value = self.cons_func(self.decision_vars)
+        self.decision_vars = torch.autograd.Variable(torch.rand([len(self.decision_var_symbol), self.decision_var_row, self.decision_var_col]), requires_grad=True)
+        ini_obj_value = self.obj_func(*self.decision_vars)
+        ini_cons_value = self.cons_func(*self.decision_vars)
         self.r = torch.autograd.Variable(ini_obj_value / (ini_cons_value + 1e-5), requires_grad=False)
         
         # solve
+        status = 1 # 求解状态
         stage_early_stop_count = 0
         optimizer = torch.optim.Adam([self.decision_vars, self.r], lr = self.lr, amsgrad=False, eps=1e-6)
         lr_schedule = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience = self.patience, min_lr = 1e-7, verbose=True)
@@ -265,7 +283,7 @@ class GDRealNumberSolver(GDSolver):
                 epoch_bar.set_description("Stage %s training" % (stage))
                 for epoch in epoch_bar:
                     optimizer.zero_grad()
-                    loss = self.loss_func(self.decision_vars, self.r)
+                    loss = self.loss_func(*self.decision_vars, self.r)
                     loss.backward()
                     optimizer.step()
                     record.append(loss.cpu().detach().numpy())
@@ -284,7 +302,7 @@ class GDRealNumberSolver(GDSolver):
                         early_stop_count = 0
                 epoch_bar.close()
                 
-            if stage_early_stop_count > self.patience and self.cons_func(self.decision_vars) <= 0.05:
+            if stage_early_stop_count > self.patience and self.cons_func(*self.decision_vars) <= 0.05:
                 print("Early Stopping")
                 break
             else:
@@ -292,32 +310,35 @@ class GDRealNumberSolver(GDSolver):
                 lr_schedule.step(loss)
         
         if stage == self.stage_num-1:
+            status = 0
             print("Failed to converge!")
         
-        print(self.decision_vars)
-        print(self.obj_func(self.decision_vars))
+        objective = self.obj_func(*self.decision_vars)
+        decision_vars = self.decision_vars.cpu().detach().numpy()
+        return status, objective, decision_vars
     
 
 # 具体工厂
 class integrityOptimizationFactory(optimizationFactory):
-    def __init__(self, decision_vars: list, obj_formula: str, d_cons_formula: dict, ):
-        self.pulp_intergrity_solver = pulpIntegritySolver(decision_vars, obj_formula, d_cons_formula)
+    def __init__(self, decision_var_shape: list, decision_var_symbol: list, obj_formula: str, d_cons_formula: dict,):
+        self.pulp_intergrity_solver = pulpIntegritySolver(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
         self.loss = self.pulp_intergrity_solver.make_loss()
+        print(self.pulp_intergrity_solver.solver)
     
     def solve(self):
         return self.pulp_intergrity_solver.solve()
 
 class binaryOptimizationFactory(optimizationFactory):
-    def __init__(self, decision_vars: list, obj_formula: str, d_cons_formula: dict, ):
-        self.pulp_binary_solver = pulpBinarySolver(decision_vars, obj_formula, d_cons_formula)
+    def __init__(self, decision_var_shape: list, decision_var_symbol: list, obj_formula: str, d_cons_formula: dict,):
+        self.pulp_binary_solver = pulpBinarySolver(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
         self.loss = self.pulp_binary_solver.make_loss()
     
     def solve(self):
         return self.pulp_binary_solver.solve()
     
 class realNumberOptimizationFactory(optimizationFactory):
-    def __init__(self, decision_vars: list, obj_formula: str, d_cons_formula: dict, ):
-        self.GD_realNum_solver = GDRealNumberSolver(decision_vars, obj_formula, d_cons_formula)
+    def __init__(self, decision_var_shape: list, decision_var_symbol: list, obj_formula: str, d_cons_formula: dict, ):
+        self.GD_realNum_solver = GDRealNumberSolver(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula)
         self.loss = self.GD_realNum_solver.make_loss()
     
     def solve(self):
@@ -347,18 +368,22 @@ def on_optimize(optimization_factory):
 
 data = pd.read_excel('./integrity_optimization.xlsx', sep = ' ', encoding = 'utf-8')
 decision_var_shape = [3, 4]
-
 y = data.iloc[:, 0:4].values
 z = data.iloc[:, 4].values
 a = np.array([80, 140, 30, 50])
 b = np.array([30, 70, 10, 10])
-obj_formula = 'sum(x * y)' #min
-d_cons_formula = {'sum(x,0)-b': 'ge','a-sum(x,0)': 'gt', 'z-sum(x,1)': 'eq', 'x':'gt'}  # >=0
-# oop = on_optimize(integrityOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
-# oop.show_info()
-# oop = on_optimize(binaryOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
-# oop.show_info()
 
+decision_var_symbol = ['x']
 obj_formula = 'sum(x * "y")' #min
-d_cons_formula = {'sum(x,0)-"b"': 'ge','"a"-sum(x,0)': 'gt', '"z"-sum(x,1)': 'eq', 'x':'gt'}  # >=0
-oop = on_optimize(realNumberOptimizationFactory(decision_var_shape, obj_formula, d_cons_formula))
+d_cons_formula = {'sum(x,0)-"b"': 'ge','"a"-sum(x,0)': 'gt', '"z"-sum(x,1)': 'eq', 'x':'gt'}  # >=0  # >=0
+
+decision_var_symbol = ['x1', 'x2']
+obj_formula = 'sum(x1 * "y" + x2 * "y")' #min
+d_cons_formula = {'sum(x1,0)-"b"': 'ge','"a"-sum(x1,0)': 'gt', '"z"-sum(x1,1)': 'eq', 'x1':'gt'}  # >=0  # >=0
+
+oop = on_optimize(integrityOptimizationFactory(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula))
+oop.show_info()
+oop = on_optimize(binaryOptimizationFactory(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula))
+oop.show_info()
+oop = on_optimize(realNumberOptimizationFactory(decision_var_shape, decision_var_symbol, obj_formula, d_cons_formula))
+oop.show_info()
